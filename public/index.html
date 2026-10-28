@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Discord Self Panel</title>
+  <style>
+    * { box-sizing: border-box; font-family: system-ui, sans-serif; }
+    body { background: #1a1b1e; color: #e4e6eb; margin: 0; padding: 20px; }
+    header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+    #connection-status.connected { color: #3ba55c; }
+    #connection-status.disconnected { color: #ed4245; }
+    section { background: #2f3136; border-radius: 8px; padding: 16px; margin-bottom: 20px; }
+    .add-token input, .bulk-bar input {
+      padding: 8px; margin-right: 8px; border-radius: 4px;
+      border: 1px solid #444; background: #40444b; color: #fff;
+    }
+    button { padding: 8px 14px; border: none; border-radius: 4px; background: #5865f2; color: #fff; cursor: pointer; }
+    button.danger { background: #ed4245; }
+    button.active { background: #3ba55c; }
+    .accounts-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; }
+    .account-card { background: #2f3136; border-radius: 8px; padding: 12px; }
+    .card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+    .card-header img { border-radius: 50%; }
+    .card-body label { display: block; margin: 6px 0; font-size: 0.85em; }
+    .card-body input, .card-body select {
+      width: 100%; padding: 6px; margin-top: 2px; border-radius: 4px;
+      border: 1px solid #444; background: #40444b; color: #fff;
+    }
+    .vc-row { display: flex; gap: 6px; margin-top: 8px; }
+    .vc-row input { flex: 1; }
+    .card-actions { display: flex; gap: 8px; margin-top: 10px; }
+    .error { color: #ed4245; font-size: 0.8em; margin-top: 4px; min-height: 1em; }
+    .empty { opacity: 0.6; }
+    .tag { font-size: 0.8em; opacity: 0.7; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Discord Self Panel</h1>
+    <div id="connection-status" class="disconnected">● Disconnected</div>
+  </header>
+
+  <section class="add-token">
+    <h2>Add Token</h2>
+    <input id="token-input" type="password" placeholder="Discord user token" autocomplete="off" />
+    <input id="alias-input" type="text" placeholder="Alias (optional)" />
+    <button id="add-btn">Add Account</button>
+    <div id="add-error" class="error"></div>
+  </section>
+
+  <section class="bulk-bar">
+    <label><input type="checkbox" id="select-all" /> Select All</label>
+    <span id="selected-count">0 selected</span>
+    <input id="bulk-status" placeholder="Status (online/idle/dnd/offline)" />
+    <input id="bulk-custom" placeholder="Custom status text" />
+    <button id="bulk-apply">Apply to Selected</button>
+    <div id="bulk-error" class="error"></div>
+  </section>
+
+  <section id="accounts" class="accounts-grid"></section>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    // ─── SOCKET SETUP ────────────────────────────────────────
+    const socket = io();
+    const accountsEl = document.getElementById('accounts');
+    const selectedIds = new Set();
+
+    socket.on('connect', () => {
+      const el = document.getElementById('connection-status');
+      el.textContent = '● Connected';
+      el.className = 'connected';
+    });
+
+    socket.on('disconnect', () => {
+      const el = document.getElementById('connection-status');
+      el.textContent = '● Disconnected';
+      el.className = 'disconnected';
+    });
+
+    socket.on('tokens:list', (tokens) => {
+      // prune selections whose IDs no longer exist
+      const liveIds = new Set(tokens.map((t) => t.id));
+      for (const id of [...selectedIds]) if (!liveIds.has(id)) selectedIds.delete(id);
+      renderAccounts(tokens);
+    });
+
+    // ─── RENDER ──────────────────────────────────────────────
+    function renderAccounts(tokens) {
+      accountsEl.innerHTML = '';
+      if (tokens.length === 0) {
+        accountsEl.innerHTML = '<p class="empty">No accounts added yet.</p>';
+        updateSelectedCount();
+        return;
+      }
+
+      tokens.forEach((t) => {
+        const card = document.createElement('div');
+        card.className = 'account-card';
+        card.innerHTML = `
+          <div class="card-header">
+            <input type="checkbox" data-id="${t.id}" ${selectedIds.has(t.id) ? 'checked' : ''} />
+            <img src="${t.avatar}" alt="avatar" width="40" height="40" onerror="this.style.visibility='hidden'" />
+            <strong>${t.alias}</strong>
+            <span class="tag">${t.tag}</span>
+          </div>
+          <div class="card-body">
+            <label>Status
+              <select data-edit="status" data-id="${t.id}">
+                ${['online', 'idle', 'dnd', 'offline']
+                  .map((s) => `<option value="${s}" ${t.status === s ? 'selected' : ''}>${s}</option>`)
+                  .join('')}
+              </select>
+            </label>
+            <label>Custom Status
+              <input data-edit="customStatus" data-id="${t.id}" value="${escapeAttr(t.customStatus || '')}" />
+            </label>
+            <label>Alias
+              <input data-edit="alias" data-id="${t.id}" value="${escapeAttr(t.alias)}" />
+            </label>
+            <div class="vc-row">
+              <input placeholder="Guild ID" data-vc="guild" data-id="${t.id}" value="${escapeAttr(t.vcGuild || '')}" />
+              <input placeholder="Channel ID" data-vc="channel" data-id="${t.id}" value="${escapeAttr(t.vcChannel || '')}" />
+              <button data-vc-toggle data-id="${t.id}" class="${t.vcActive ? 'active' : ''}">
+                ${t.vcActive ? 'Stop 24/7 VC' : 'Start 24/7 VC'}
+              </button>
+            </div>
+            <div class="card-actions">
+              <button data-save data-id="${t.id}">Save Changes</button>
+              <button data-delete data-id="${t.id}" class="danger">Remove</button>
+            </div>
+            <div class="error" data-error-for="${t.id}"></div>
+          </div>
+        `;
+        accountsEl.appendChild(card);
+      });
+
+      bindEvents();
+      updateSelectedCount();
+    }
+
+    function escapeAttr(str) {
+      return String(str).replace(/[&<>"']/g, (c) => (
+        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+      ));
+    }
+
+    // ─── EVENT BINDINGS ──────────────────────────────────────
+    function bindEvents() {
+      document.querySelectorAll('input[type="checkbox"][data-id]').forEach((cb) => {
+        cb.addEventListener('change', (e) => {
+          const id = e.target.dataset.id;
+          if (e.target.checked) selectedIds.add(id);
+          else selectedIds.delete(id);
+          updateSelectedCount();
+        });
+      });
+
+      document.querySelectorAll('[data-save]').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const id = btn.dataset.id;
+          const updates = {};
+          document.querySelectorAll(`[data-edit][data-id="${id}"]`).forEach((el) => {
+            updates[el.dataset.edit] = el.value;
+          });
+          const errEl = document.querySelector(`[data-error-for="${id}"]`);
+          errEl.textContent = '';
+          try {
+            const res = await fetch(`/api/tokens/${id}`, {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(updates)
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'Update failed.');
+          } catch (err) {
+            errEl.textContent = err.message;
+          }
+        });
+      });
+
+      document.querySelectorAll('[data-delete]').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          if (!confirm('Remove this account?')) return;
+          try {
+            await fetch(`/api/tokens/${btn.dataset.id}`, { method: 'DELETE' });
+          } catch (err) {
+            alert('Delete failed: ' + err.message);
+          }
+        });
+      });
+
+      document.querySelectorAll('[data-vc-toggle]').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const id = btn.dataset.id;
+          const guild = document.querySelector(`[data-vc="guild"][data-id="${id}"]`).value.trim();
+          const channel = document.querySelector(`[data-vc="channel"][data-id="${id}"]`).value.trim();
+          const errEl = document.querySelector(`[data-error-for="${id}"]`);
+          errEl.textContent = '';
+          try {
+            const res = await fetch(`/api/tokens/${id}/vc`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ guildId: guild, channelId: channel })
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'VC toggle failed.');
+          } catch (err) {
+            errEl.textContent = err.message;
+          }
+        });
+      });
+    }
+
+    // ─── ADD TOKEN ───────────────────────────────────────────
+    document.getElementById('add-btn').addEventListener('click', async () => {
+      const token = document.getElementById('token-input').value.trim();
+      const alias = document.getElementById('alias-input').value.trim();
+      const errEl = document.getElementById('add-error');
+      errEl.textContent = '';
+
+      if (!token) {
+        errEl.textContent = 'Token is required.';
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/tokens', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token, alias })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Add failed.');
+        document.getElementById('token-input').value = '';
+        document.getElementById('alias-input').value = '';
+      } catch (err) {
+        errEl.textContent = err.message;
+      }
+    });
+
+    // ─── BULK APPLY ──────────────────────────────────────────
+    document.getElementById('bulk-apply').addEventListener('click', async () => {
+      const errEl = document.getElementById('bulk-error');
+      errEl.textContent = '';
+      if (selectedIds.size === 0) {
+        errEl.textContent = 'No accounts selected.';
+        return;
+      }
+
+      const updates = {};
+      const status = document.getElementById('bulk-status').value.trim();
+      const custom = document.getElementById('bulk-custom').value.trim();
+      if (status) updates.status = status;
+      if (custom) updates.customStatus = custom;
+
+      if (Object.keys(updates).length === 0) {
+        errEl.textContent = 'No fields to update.';
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/tokens/bulk-edit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ids: [...selectedIds], updates })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Bulk edit failed.');
+        const errors = data.filter((r) => r.error);
+        if (errors.length) errEl.textContent = `${errors.length} account(s) failed.`;
+      } catch (err) {
+        errEl.textContent = err.message;
+      }
+    });
+
+    // ─── HELPERS ─────────────────────────────────────────────
+    function updateSelectedCount() {
+      document.getElementById('selected-count').textContent = `${selectedIds.size} selected`;
+      const selectAll = document.getElementById('select-all');
+      if (selectAll) {
+        const all = document.querySelectorAll('input[type="checkbox"][data-id]');
+        selectAll.checked = all.length > 0 && [...all].every((cb) => cb.checked);
+      }
+    }
+
+    // select-all lives outside the dynamic grid → bind once
+    document.getElementById('select-all').addEventListener('change', (e) => {
+      document.querySelectorAll('input[type="checkbox"][data-id]').forEach((cb) => {
+        cb.checked = e.target.checked;
+        const id = cb.dataset.id;
+        if (e.target.checked) selectedIds.add(id);
+        else selectedIds.delete(id);
+      });
+      updateSelectedCount();
+    });
+  </script>
+</body>
+</html>
